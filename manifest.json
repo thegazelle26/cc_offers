@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Offer Adder (local)",
+  "version": "0.2.0",
+  "description": "Lists unadded card offers on Amex, Chase and Citi and adds the ones you select. Runs only on those sites, makes no requests of its own to anywhere else, stores nothing.",
+  "permissions": [],
+  "host_permissions": [],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://global.americanexpress.com/*",
+        "https://*.chase.com/*",
+        "https://online.citi.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
