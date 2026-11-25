@@ -6,15 +6,46 @@
   const log = (...a) => DEBUG && console.log("[offer-adder]", ...a);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const jitter = (min, max) => min + Math.random() * (max - min);
-  const strip = (s) => (typeof s === "string" ? s.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() : "");
+  const ENT = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", rsquo: "\u2019", lsquo: "\u2018", ndash: "\u2013", mdash: "\u2014", reg: "\u00ae", trade: "\u2122" };
+  const strip = (s) =>
+    typeof s === "string"
+      ? s
+          .replace(/<[^>]*>/g, " ")
+          .replace(/&(#?\w+);/g, (m, e) => (e[0] === "#" ? String.fromCharCode(e[1] === "x" ? parseInt(e.slice(2), 16) : +e.slice(1)) : ENT[e] ?? m))
+          .replace(/\s+/g, " ")
+          .trim()
+      : "";
   const cookie = (name) => {
     const m = document.cookie.match(new RegExp("(?:^|; )" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "=([^;]*)"));
     return m ? decodeURIComponent(m[1]) : "";
   };
 
+  // Pull the first non-empty text value whose key matches `re`, searching a few levels deep.
+  // Field names differ per bank and aren't documented, so match loosely.
+  // ISO timestamps (Chase) -> local M/D/YYYY; anything else passes through unchanged.
+  const fmtDate = (t) => (/^\d{4}-\d{2}-\d{2}T/.test(t) && !isNaN(Date.parse(t)) ? new Date(t).toLocaleDateString("en-US") : t);
+  const isCode = (t) => /^[A-Z0-9_]+$/.test(t); // enum placeholders like NONE, MIN_SPEND_AMOUNT
+  // Collect text values whose key matches `re`, searching a few levels deep, and return the longest real one.
+  // Field names differ per bank and aren't documented, so match loosely.
+  const findText = (obj, re) => {
+    let best = "";
+    const walk = (o, depth) => {
+      if (!o || typeof o !== "object" || depth > 4) return;
+      for (const [k, v] of Object.entries(o)) {
+        if (re.test(k)) {
+          const t = strip(Array.isArray(v) ? v.filter((x) => typeof x === "string").join(" ") : typeof v === "string" || typeof v === "number" ? String(v) : "");
+          if (t && !isCode(t) && t.length > best.length) best = t;
+        }
+        if (v && typeof v === "object") walk(v, depth + 1);
+      }
+    };
+    walk(obj, 0);
+    return best;
+  };
+
   // Every adapter implements:
-  //   cards():            -> [{id, name}]
-  //   offers(card):       -> [{key, title, detail, raw}]   (only offers not yet added)
+  //   cards():                     -> [{id, name}]
+  //   offers(card, wantAdded):     -> [{key, title, detail, raw}]   (offers not yet added, or already added if wantAdded)
   //   add(card, offer):   -> {ok, status, retry?}
   const host = location.hostname;
   let adapter = null;
@@ -39,7 +70,7 @@
         })
         .map((p) => ({ id: p.id, name: p.description || p.name || p.id, locale: p.locale }));
     },
-    async offers(card) {
+    async offers(card, wantAdded = false) {
       const out = new Map();
       for (let page = 1; page <= 10; page++) {
         const res = await fetch("https://functions.americanexpress.com/ReadOffersHubPresentation.web.v1", {
@@ -64,7 +95,7 @@
         for (const o of list) {
           if (!o?.id || out.has(o.id)) continue;
           fresh++;
-          if (o.enrollmentDetails?.status === "ENROLLED") continue;
+          if ((o.enrollmentDetails?.status === "ENROLLED") !== wantAdded) continue;
           out.set(o.id, {
             key: o.id,
             title: o.name || o.merchantName || o.id,
@@ -145,7 +176,7 @@
         .filter((a) => a.groupType === "CARD" && !a.detail?.closed)
         .map((a) => ({ id: String(a.id), name: a.nickname || a.detail?.cardType || String(a.id) }));
     },
-    async offers(card) {
+    async offers(card, wantAdded = false) {
       const eci = this.eci();
       const url =
         `${location.origin}/svc/wr/profile/secure/gateway/ccb/marketing/offer-management/digital-customer-targeted-offers/v3/customer-offers` +
@@ -175,7 +206,7 @@
         list = mine?.offers || list[0].offers;
       }
       return (list || [])
-        .filter((o) => o.offerStatusName !== "ACTIVATED")
+        .filter((o) => (o.offerStatusName === "ACTIVATED") === wantAdded)
         .map((o) => ({
           key: o.offerIdentifier,
           title: o.merchantDetails?.merchantName || o.MerchantName || o.offerIdentifier,
@@ -243,7 +274,7 @@
         .filter((a) => a.accountStatus === "ACTIVE" && a.personalAccount == 1)
         .map((a) => ({ id: a.accountId, name: a.accountName || a.productName || a.accountId }));
     },
-    async offers(card) {
+    async offers(card, wantAdded = false) {
       const r = await this.call("https://online.citi.com/gcgapi/prod/public/v1/digital/customers/creditCards/merchantOffers/retrieve", "POST", { accountId: card.id });
       if (r.status !== 200 || !Array.isArray(r.body?.merchantOffers)) throw new Error("Citi offers request failed: " + r.status);
       const seen = new Set();
@@ -251,7 +282,7 @@
       for (const grp of r.body.merchantOffers) {
         for (const o of grp?.offers || []) {
           const key = o.offerId + "|" + (o.offerEndDate || "");
-          if (seen.has(key) || o.offerStatus !== "AVAILABLE") continue;
+          if (seen.has(key) || (o.offerStatus === "AVAILABLE") === wantAdded) continue;
           seen.add(key);
           out.push({
             key: o.offerId,
@@ -301,14 +332,18 @@
       .list{overflow:auto;flex:1;padding:4px 0}
       label.row{display:flex;gap:10px;padding:7px 14px;cursor:pointer;align-items:flex-start}
       label.row:hover{background:#f3f4f8}
-      .t{font-weight:600}.d{color:#555;font-size:12px}
+      .t{font-weight:600}.d{color:#555;font-size:12px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
       .st{margin-left:auto;font-size:12px;white-space:nowrap}
       .ok{color:#0a7a2f}.bad{color:#b3261e}
       footer{padding:10px 14px;border-top:1px solid #ddd;display:flex;gap:8px;align-items:center}
       footer span{flex:1;font-size:12px;color:#555}
       .go{padding:8px 14px;border:0;border-radius:8px;background:#0b57d0;color:#fff;font-weight:600;cursor:pointer}
       .go:disabled{opacity:.5;cursor:default}
+      .copy{padding:8px 10px;border:1px solid #0b57d0;border-radius:8px;background:#fff;color:#0b57d0;font-weight:600;cursor:pointer}
+      .copy:disabled{opacity:.5;cursor:default}
       .x{border:0;background:none;font-size:18px;cursor:pointer}
+      .out{margin:0 14px 8px;height:140px;font:12px ui-monospace,monospace;resize:vertical}
+      .out[hidden]{display:none}
       .msg{padding:16px 14px;color:#555}
     </style>
     <button class="fab">Offers</button>
@@ -316,11 +351,12 @@
       <header><b></b><select aria-label="Card"></select><button class="x" aria-label="Close">×</button></header>
       <div class="bar"><label><input type="checkbox" class="all"> Select all</label><span class="count"></span></div>
       <div class="list"></div>
-      <footer><span class="status"></span><button class="go" disabled>Add selected</button></footer>
+      <textarea class="out" readonly hidden aria-label="Copied offers"></textarea>
+      <footer><span class="status"></span><button class="copy" title="Copy every offer already added to the selected card(s)">Copy added</button><button class="go" disabled>Add selected</button></footer>
     </div>`;
   const $ = (s) => root.querySelector(s);
   const fab = $(".fab"), panel = $(".panel"), sel = $("select"), list = $(".list");
-  const all = $(".all"), go = $(".go"), status = $(".status"), count = $(".count");
+  const all = $(".all"), go = $(".go"), copyBtn = $(".copy"), out = $(".out"), status = $(".status"), count = $(".count");
   $("header b").textContent = adapter.name + " offers";
 
   let cards = [], offers = [], busy = false, stop = false;
@@ -409,6 +445,79 @@
     }
   }
 
+  async function copyAdded() {
+    const targets = selectedCards().filter(Boolean);
+    if (!targets.length) return;
+    copyBtn.disabled = true;
+    setStatus("Collecting added offers…");
+    const groups = new Map(), errors = [];
+    let total = 0, sampled = false;
+    for (const card of targets) {
+      try {
+        const found = await adapter.offers(card, true);
+        total += found.length;
+        for (const o of found) {
+          const r = o.raw || {};
+          let offer = findText(r, /reward.?desc/i) || o.detail || "n/a";
+          let terms = findText(r, /terms|legal|disclaimer|fine.?print/i);
+          // Some offers have no separate terms field: description, blurb and terms are one blob.
+          const cut = offer.search(/Offer expires/i);
+          if (cut >= 0 && (!terms || terms.length < 60)) {
+            terms = offer.slice(cut);
+            const head = offer.slice(0, cut).trim();
+            const sents = head.split(/(?<=[a-z)])\.\s+(?=[A-Z])/);
+            let first = sents[0];
+            if (sents[1] && /^(Limit of|Please note)/.test(sents[1])) first += ". " + sents[1];
+            offer = first.replace(/\.?$/, ".");
+          }
+          if (!terms) terms = o.detail || "none listed";
+          const expires =
+            fmtDate(findText(r, /expir|end.?(date|dt|time)|valid.?(to|thru|through|until)/i)) ||
+            (terms.match(/expires?(?: on)?\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i) || [])[1] ||
+            "unknown";
+          if (!sampled) { sampled = true; console.log("[offer-adder] sample raw offer:", JSON.stringify(r)); }
+          const k = [o.title, offer, expires].join("|");
+          const g = groups.get(k) || { vendor: o.title, offer, expires, terms, cards: [] };
+          if (!g.cards.includes(card.name)) g.cards.push(card.name);
+          groups.set(k, g);
+        }
+      } catch (e) {
+        errors.push(`${card.name}: ${e.message || e}`);
+      }
+      if (targets.length > 1) await sleep(300);
+    }
+    const blocks = [...groups.values()].map(
+      (g) => `Cards: ${g.cards.join(", ")}\nVendor: ${g.vendor}\nOffer: ${g.offer}\nExpires: ${g.expires}\nTerms: ${g.terms}`
+    );
+    const text = `${adapter.name} offers already added (${blocks.length} unique, ${total} across cards):\n\n` + blocks.join("\n\n");
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (_) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        root.appendChild(ta);
+        ta.select();
+        copied = document.execCommand("copy");
+        ta.remove();
+      } catch (_) {}
+    }
+    copyBtn.disabled = false;
+    if (copied) {
+      out.hidden = true;
+      setStatus(errors.length ? errors.join(" | ") : `Copied ${total} added offers to clipboard.`);
+    } else {
+      // Browser blocked the write (page not focused, e.g. DevTools has focus). Let the user copy by hand.
+      out.hidden = false;
+      out.value = text;
+      out.focus();
+      out.select();
+      setStatus("Auto-copy blocked. Text is selected below: press Cmd/Ctrl+C." + (errors.length ? " " + errors.join(" | ") : ""));
+    }
+  }
+
   async function addSelected() {
     const picks = checks().filter((c) => c.checked).map((c) => offers[Number(c.dataset.i)]);
     busy = true; stop = false;
@@ -459,6 +568,7 @@
   });
   $(".x").addEventListener("click", () => panel.classList.remove("open"));
   sel.addEventListener("change", loadOffers);
+  copyBtn.addEventListener("click", copyAdded);
   all.addEventListener("change", () => {
     checks().forEach((c) => (c.checked = all.checked));
     refreshCount();

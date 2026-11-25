@@ -28,6 +28,12 @@ After editing any file, click the reload icon on the extension's card in
 6. Click **Stop** (the same button) at any time to halt.
 7. Click the **×** to close the panel.
 
+### Export offers you've already added
+
+Click **Copy added** in the panel footer to copy every offer already on the selected card (or all cards) to the clipboard, ready to paste into Claude or a notes file. Each entry has the cards, vendor, offer, expiry date and full terms; identical offers across cards are merged into one entry.
+
+Tested on Chase. Amex and Citi use the same button, but field names for expiry and terms are matched loosely and may come out as `unknown`. If the browser blocks the clipboard (for example, DevTools has focus), a text box appears with the text selected so you can press Cmd+C.
+
 Start with a card or two and a few offers, then check them on the bank's site before running the whole list.
 
 ### What to expect
